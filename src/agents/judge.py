@@ -40,7 +40,8 @@ Score 0.0-1.0 based on evidence:
 """
 
 import logging
-from typing import List, Dict, Optional
+import re
+from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 
 from src.state import ReviewerFinding
@@ -260,10 +261,15 @@ class JudgeAgent:
     def _check_context_support(
         self,
         finding: ReviewerFinding,
-        context_references: Dict[str, List[CodeReference]]
+        context_references: Dict[str, Any]
     ) -> List[str]:
         """
         Check if context references support the finding.
+
+        Context structure (3-level):
+        - level_0: Changed code (definitions)
+        - level_1: Callers
+        - level_2_summary: Blast radius summaries
 
         Returns list of evidence strings if supported, empty list otherwise.
         """
@@ -271,17 +277,54 @@ class JudgeAgent:
 
         # Extract potential symbols from the finding description
         # Simple heuristic: look for capitalized words or words in backticks
-        import re
         symbols = re.findall(r'`([^`]+)`', finding.description)
         symbols.extend(re.findall(r'\b([A-Z][a-zA-Z0-9_]*)\b', finding.description))
 
+        # Safely read the 3-level structure
+        level_0 = context_references.get("level_0", {})
+        level_1 = context_references.get("level_1", {})
+        level_2_summary = context_references.get("level_2_summary", {})
+
         for symbol in symbols:
-            if symbol in context_references:
-                refs = context_references[symbol]
-                # Check if the symbol is used in ways that support the finding
-                evidence.append(
-                    f"Symbol '{symbol}' referenced in {len(refs)} locations"
-                )
+            # Check level_1: Callers (most common evidence)
+            if symbol in level_1:
+                try:
+                    caller_refs = level_1[symbol]
+                    if isinstance(caller_refs, list) and len(caller_refs) > 0:
+                        evidence.append(
+                            f"Symbol '{symbol}' has {len(caller_refs)} caller reference(s) in the codebase"
+                        )
+                except (TypeError, AttributeError):
+                    # Unexpected type, skip this symbol
+                    continue
+
+            # Check level_0: Changed code (definitions)
+            if symbol in level_0:
+                try:
+                    symbol_data = level_0[symbol]
+                    if isinstance(symbol_data, dict):
+                        defs = symbol_data.get("definition_refs", [])
+                        if isinstance(defs, list) and len(defs) > 0:
+                            evidence.append(
+                                f"Symbol '{symbol}' has {len(defs)} definition reference(s)"
+                            )
+                except (TypeError, AttributeError):
+                    # Unexpected type, skip this symbol
+                    continue
+
+            # Check level_2_summary: Blast radius
+            if symbol in level_2_summary:
+                try:
+                    summary = level_2_summary[symbol]
+                    if isinstance(summary, str) and summary:
+                        # Truncate summary to ~120 chars for evidence line
+                        truncated = summary[:120] + "..." if len(summary) > 120 else summary
+                        evidence.append(
+                            f"Symbol '{symbol}' blast-radius: {truncated}"
+                        )
+                except (TypeError, AttributeError):
+                    # Unexpected type, skip this symbol
+                    continue
 
         return evidence
 
