@@ -2,6 +2,8 @@
 requests>=2.31.0           # GitHub API calls
 langgraph>=0.0.40          # State graph orchestration
 langchain>=0.1.0           # LLM framework (for agents)
+langchain-anthropic>=0.1.0 # Claude API integration
+python-dotenv>=1.0.0       # Environment variable management
 
 # Development/testing
 pytest>=7.4.0

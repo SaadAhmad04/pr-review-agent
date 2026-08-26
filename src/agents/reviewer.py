@@ -32,8 +32,15 @@ Example prompt structure:
 The prompt adapts to the language, but the INPUT/OUTPUT schemas don't change.
 """
 
+from email.mime import text
 import logging
+import json
+import os
+import re
 from typing import List, Dict, Optional, Any
+
+from dotenv import load_dotenv
+from langchain_anthropic import ChatAnthropic
 
 from src.state import ReviewerFinding
 from src.tools.diff_fetch import PRDiff
@@ -41,7 +48,13 @@ from src.language.detector import LanguageInfo
 from src.static_analysis.base import Finding
 from src.context_search.base import CodeReference
 
+# Load environment variables from .env file
+load_dotenv()
+
 logger = logging.getLogger(__name__)
+
+# Conservative token budget ceiling — well under Claude's context window, leaving room for response
+MAX_PROMPT_TOKENS = 15000
 
 
 class ReviewerAgent:
@@ -52,7 +65,7 @@ class ReviewerAgent:
     In the next phase, we'll add actual LLM calls (Claude via Anthropic API).
     """
 
-    def __init__(self, model: str = "claude-3-5-sonnet-20241022"):
+    def __init__(self, model: str = "claude-sonnet-4-5-20250929"):
         self.model = model
 
     def review(
@@ -77,6 +90,15 @@ class ReviewerAgent:
             List of ReviewerFinding objects
         """
 
+        # Graceful degradation if API key not set
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            logger.warning(
+                "ANTHROPIC_API_KEY not set — skipping LLM review, returning no findings. "
+                "Set the key in .env to enable AI-powered review."
+            )
+            return []
+
         # Build the prompt
         prompt = self._build_prompt(
             pr_diff=pr_diff,
@@ -87,26 +109,38 @@ class ReviewerAgent:
         )
 
         logger.info(f"Reviewer prompt built ({len(prompt)} chars)")
-        logger.debug(f"Prompt preview:\n{prompt[:500]}...")
 
-        # TODO: Call LLM here
-        # For now, return empty findings to show the structure
-
-        # Placeholder: simulate finding one issue
-        placeholder_findings = [
-            ReviewerFinding(
-                file_path=pr_diff.files[0].filename if pr_diff.files else "unknown",
-                line=1,
-                severity="minor",
-                category="logic",
-                title="Placeholder finding",
-                description="This is a placeholder. LLM integration coming next.",
-                suggestion="Integrate Claude API to generate real findings.",
-                confidence=1.0,
+        # Create the LLM client ONCE and reuse it for token counting + the call
+        try:
+            llm = ChatAnthropic(
+                model_name=self.model,        # correct for this version (verified via signature)
+                temperature=0.0,              # deterministic review
+                max_tokens_to_sample=4096,    # correct for this version (verified via signature)
+                timeout=60.0,                 # REQUIRED in this version — 60s per call
+                stop=None,                    # REQUIRED in this version — no custom stop sequences
             )
-        ]
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM client: {e}")
+            return []
 
-        return placeholder_findings
+        # Token budgeting (pass the existing client — don't create a new one)
+        prompt = self._truncate_to_budget(prompt, llm)
+
+        # Call LLM with retry logic
+        try:
+            response_text = self._call_llm_with_retry(llm, prompt, max_attempts=2)
+            if response_text is None:
+                logger.error("LLM call failed after retries — returning no findings")
+                return []
+
+            # Parse response into ReviewerFinding objects
+            findings = self._parse_findings(response_text)
+            logger.info(f"Reviewer agent generated {len(findings)} findings")
+            return findings
+
+        except Exception as e:
+            logger.error(f"Unexpected error during LLM review: {e}")
+            return []
 
     def _build_prompt(
         self,
@@ -434,3 +468,197 @@ Static analysis already caught the simple stuff.
             "rust": "rs",
         }
         return extensions.get(language, "txt")
+
+    def _count_tokens(self, text: str, llm: ChatAnthropic) -> int:
+        """
+        Estimate token count for budgeting purposes.
+
+        WHY CHARACTER APPROXIMATION (not a "real" tokenizer):
+        - tiktoken is OpenAI's tokenizer — WRONG for Claude. Never use it.
+        - langchain-anthropic's get_num_tokens() does NOT use Claude's tokenizer
+        either; in this version it falls back to a GPT-2 tokenizer (also wrong,
+        and requires the heavy `transformers` package). Verified broken/inaccurate.
+        - Anthropic's real count_tokens endpoint requires a network round-trip per
+        call — overkill for a simple "is the prompt too big?" budget check.
+
+        So we use a conservative ~4-chars-per-token approximation. This is only
+        used to decide whether to truncate before a deliberately conservative
+        ceiling (MAX_PROMPT_TOKENS), so approximate is sufficient.
+        """
+        return len(text) // 4
+
+    def _truncate_to_budget(self, prompt: str, llm: ChatAnthropic) -> str:
+        """
+        Truncate prompt to fit within MAX_PROMPT_TOKENS budget.
+
+        Strategy: Hard-truncate from the end (which contains diff/context sections,
+        not the instructions). Append a clear note that truncation occurred.
+
+        This is a simple, conservative approach. A more sophisticated version could
+        preserve instructions and truncate only context sections, but this is
+        sufficient for v1.
+
+        Args:
+            prompt: The prompt text to potentially truncate
+            llm: The ChatAnthropic client to use for token counting
+
+        Returns:
+            The original or truncated prompt
+        """
+        token_count = self._count_tokens(prompt, llm)
+
+        if token_count <= MAX_PROMPT_TOKENS:
+            return prompt
+
+        logger.warning(
+            f"Prompt exceeds token budget ({token_count} > {MAX_PROMPT_TOKENS}), truncating"
+        )
+
+        # Approximate character budget (conservative ratio: 4 chars per token)
+        char_budget = MAX_PROMPT_TOKENS * 4
+        truncation_note = "\n\n[NOTE: Context truncated to fit token budget. Review focuses on visible changes.]"
+
+        # Leave room for the truncation note
+        truncated = prompt[: char_budget - len(truncation_note)] + truncation_note
+
+        return truncated
+
+    def _call_llm_with_retry(
+        self, llm: ChatAnthropic, prompt: str, max_attempts: int = 2
+    ) -> Optional[str]:
+        """
+        Call the LLM with simple retry logic for transient errors.
+
+        Args:
+            llm: The ChatAnthropic client
+            prompt: The prompt to send
+            max_attempts: Maximum number of attempts (default 2)
+
+        Returns:
+            Response text, or None if all attempts fail
+        """
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = llm.invoke(prompt)
+                content = response.content
+
+                # content can be a string OR a list of content blocks depending on
+                # the response type. Normalize to a plain string for downstream parsing.
+                if isinstance(content, list):
+                    parts = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            parts.append(block.get("text", ""))
+                        else:
+                            parts.append(str(block))
+                    content = "".join(parts)
+
+                return content
+            except Exception as e:
+                logger.warning(f"LLM call attempt {attempt}/{max_attempts} failed: {e}")
+                if attempt == max_attempts:
+                    logger.error("All LLM call attempts failed")
+                    return None
+
+        return None
+
+    def _extract_json_array(self, text: str) -> Optional[str]:
+        """
+        Extract JSON array from LLM response.
+
+        Prefer content inside a ```json ... ``` fence if present;
+        otherwise take from the first '[' to the last ']'. This is more robust than a
+        greedy regex when the model adds prose containing stray brackets.
+
+        Args:
+            text: Raw LLM response text
+
+        Returns:
+            Extracted JSON string, or None if no array found
+        """
+        # 1. Try a fenced code block first (handles both ```json and plain ```)
+        fence = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
+        if fence:
+            return fence.group(1)
+
+        # 2. Fall back to first '[' ... last ']'
+        start = text.find('[')
+        end = text.rfind(']')
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1]
+
+        return None
+
+    def _parse_findings(self, response_text: str) -> List[ReviewerFinding]:
+        """
+        Parse LLM response into ReviewerFinding objects.
+
+        Robust parsing strategy:
+        1. Extract JSON array (handle markdown fences or surrounding prose)
+        2. Parse each item with defaults for missing fields
+        3. Clamp/coerce values to valid ranges
+        4. Log warnings for malformed items but don't crash the pipeline
+
+        Args:
+            response_text: Raw LLM response (may contain JSON in markdown fences)
+
+        Returns:
+            List of ReviewerFinding objects (empty if parsing fails)
+        """
+        # Extract JSON array from response (may be wrapped in markdown fences or prose)
+        json_str = self._extract_json_array(response_text)
+        if json_str is None:
+            logger.warning(
+                f"No JSON array found in LLM response. Response preview: {response_text[:200]}"
+            )
+            return []
+
+        try:
+            items = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"Failed to parse JSON from LLM response: {e}. JSON preview: {json_str[:200]}"
+            )
+            return []
+
+        if not isinstance(items, list):
+            logger.warning(f"LLM response JSON is not an array: {type(items)}")
+            return []
+
+        findings = []
+        for idx, item in enumerate(items):
+            try:
+                # Extract fields with defaults
+                file_path = item.get("file_path", "unknown")
+                line = int(item.get("line", 1))  # Coerce to int
+                severity = item.get("severity", "minor")
+                category = item.get("category", "logic")
+                title = item.get("title", "")
+                description = item.get("description", "")
+                suggestion = item.get("suggestion", "")
+                confidence = float(item.get("confidence", 0.5))  # Coerce to float
+
+                # Clamp confidence to [0.0, 1.0]
+                confidence = max(0.0, min(1.0, confidence))
+
+                # Ensure line is positive
+                line = max(1, line)
+
+                finding = ReviewerFinding(
+                    file_path=file_path,
+                    line=line,
+                    severity=severity,
+                    category=category,
+                    title=title,
+                    description=description,
+                    suggestion=suggestion,
+                    confidence=confidence,
+                )
+                findings.append(finding)
+
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Skipping malformed finding at index {idx}: {e}. Item: {item}")
+                continue
+
+        logger.info(f"Parsed {len(findings)}/{len(items)} findings from LLM response")
+        return findings
