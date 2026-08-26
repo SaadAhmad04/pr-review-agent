@@ -1,0 +1,12 @@
+# Secrets - NEVER commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# Document files
+DOCS/

@@ -1,0 +1,15 @@
+# Core dependencies
+requests>=2.31.0           # GitHub API calls
+langgraph>=0.0.40          # State graph orchestration
+langchain>=0.1.0           # LLM framework (for agents)
+
+# Development/testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Note: External tools required but not pip-installable:
+# - pylint (Python linting): pip install pylint
+# - ripgrep (fast search): https://github.com/BurntSushi/ripgrep/releases
+# - checkstyle (Java): https://checkstyle.sourceforge.io/
+# - golangci-lint (Go): https://golangci-lint.run/usage/install/
+# - cppcheck (C/C++): https://cppcheck.sourceforge.io/
