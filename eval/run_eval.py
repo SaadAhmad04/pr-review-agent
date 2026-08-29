@@ -75,20 +75,39 @@ class LanguageStats:
     recall_change: float
 
 
-def create_mock_pr_for_bug(bug) -> dict:
+def create_mock_pr_for_bug(bug):
     """
     Create a mock PR state for a seeded bug.
 
     In production, this would fetch real PR data from GitHub.
     For eval, we create synthetic diffs with the buggy code.
+
+    Returns:
+        PRDiff: A synthetic PR diff object
     """
     from src.tools.diff_fetch import PRDiff, FileDiff
 
-    # Create a diff showing the bug being introduced
-    patch = f"""@@ -{bug.line_start},8 +{bug.line_start},8 @@
-{bug.code_before}
-+{bug.code_after}
-"""
+    # Build valid unified diff format
+    # Split multi-line code into lines
+    before_lines = bug.code_before.split('\n')
+    after_lines = bug.code_after.split('\n')
+
+    # Count lines for hunk header
+    before_count = len(before_lines)
+    after_count = len(after_lines)
+
+    # Build diff patch with correct prefixes
+    diff_lines = [f"@@ -{bug.line_start},{before_count} +{bug.line_start},{after_count} @@"]
+
+    # Add removed lines (prefix with -)
+    for line in before_lines:
+        diff_lines.append(f"-{line}")
+
+    # Add added lines (prefix with +)
+    for line in after_lines:
+        diff_lines.append(f"+{line}")
+
+    patch = '\n'.join(diff_lines)
 
     pr_diff = PRDiff(
         pr_number=int(bug.id.split('-')[1]),
@@ -97,8 +116,8 @@ def create_mock_pr_for_bug(bug) -> dict:
             FileDiff(
                 filename=bug.file_path,
                 status="modified",
-                additions=bug.code_after.count('\n'),
-                deletions=bug.code_before.count('\n'),
+                additions=after_count,
+                deletions=before_count,
                 patch=patch
             )
         ],
@@ -149,6 +168,10 @@ def is_finding_match(finding: ReviewerFinding, bug) -> bool:
 def evaluate_bug(bug, graph, language: str) -> EvalResult:
     """
     Run the agent on a single seeded bug and evaluate results.
+
+    NOTE: This eval pass tests the Reviewer in isolation. Static analysis and
+    context search are intentionally left empty (known limitation) — feeding
+    real static/context data is a future enhancement.
     """
     print(f"\n  Evaluating: {bug.id} - {bug.title}")
 
@@ -171,29 +194,29 @@ def evaluate_bug(bug, graph, language: str) -> EvalResult:
     state["detected_languages"] = detect_languages_from_files(files)
     state["primary_language"] = language
 
-    # Mock static analysis (for demo, we'll say it found nothing)
-    # In production, this would run real linters
+    # Intentionally empty for this eval pass (testing reviewer in isolation)
+    # TODO: Future eval passes should feed real static analysis and context search results
     state["static_analysis_findings"] = []
     state["static_analysis_results"] = {}
-
-    # Mock context search
     state["context_references"] = {}
 
-    # Generate placeholder reviewer findings (simulating LLM)
-    # In production, this would call the actual Reviewer agent
-    # For now, we'll create one finding that matches the bug
-    state["reviewer_findings"] = [
-        ReviewerFinding(
-            file_path=bug.file_path,
-            line=bug.line_start + 2,
-            severity=bug.severity,
-            category=bug.category.lower().replace("_", " "),
-            title=bug.title,
-            description=bug.description[:200],
-            suggestion="Fix the issue as described",
-            confidence=0.85
+    # REAL Reviewer agent call (replaces placeholder fabrication)
+    from src.agents.reviewer import ReviewerAgent
+
+    agent = ReviewerAgent()
+    try:
+        reviewer_findings = agent.review(
+            pr_diff=pr_diff,
+            primary_language=language,
+            detected_languages=state["detected_languages"],
+            static_findings=state["static_analysis_findings"],  # Empty for now (known limitation)
+            context_references=state["context_references"],      # Empty for now (known limitation)
         )
-    ]
+    except Exception as e:
+        print(f"    Reviewer call failed for {bug.id}: {e}")
+        reviewer_findings = []
+
+    state["reviewer_findings"] = reviewer_findings
 
     # Run through Judge
     from src.agents.judge import JudgeAgent
@@ -215,6 +238,8 @@ def evaluate_bug(bug, graph, language: str) -> EvalResult:
     )
 
     # Identify false positives (findings that don't match the seeded bug)
+    # NOTE: A "FP" here means "doesn't match THIS seeded bug" — it could be
+    # a real issue elsewhere in the code. This is a limitation of single-bug eval.
     reviewer_fp = [
         f for f in state["reviewer_findings"]
         if not is_finding_match(f, bug)
@@ -246,8 +271,12 @@ def evaluate_bug(bug, graph, language: str) -> EvalResult:
     )
 
 
-def calculate_language_stats(results: List[EvalResult], language: str) -> LanguageStats:
-    """Calculate aggregate statistics for one language."""
+def calculate_language_stats(results: List[EvalResult], language: str):
+    """Calculate aggregate statistics for one language.
+    
+    Returns:
+        LanguageStats or None: Statistics for the language, or None if no results
+    """
     lang_results = [r for r in results if r.language == language]
     total = len(lang_results)
 
@@ -385,8 +414,10 @@ def main():
     # Print results
     print_separator("EVALUATION RESULTS")
 
-    print_stats_table(java_stats)
-    print_stats_table(python_stats)
+    if java_stats:
+        print_stats_table(java_stats)
+    if python_stats:
+        print_stats_table(python_stats)
 
     # Overall stats
     print_separator("OVERALL RESULTS")
@@ -431,35 +462,59 @@ def main():
     # Language-agnostic proof
     print_separator("LANGUAGE-AGNOSTIC DESIGN VALIDATION")
 
-    print("\nThe agent's performance is SIMILAR across both languages,")
-    print("proving the language-agnostic design works in practice:")
-    print()
-    print(f"Java:")
-    print(f"  Precision: {java_stats.judge_precision:.1%}")
-    print(f"  Recall: {java_stats.judge_recall:.1%}")
-    print()
-    print(f"Python:")
-    print(f"  Precision: {python_stats.judge_precision:.1%}")
-    print(f"  Recall: {python_stats.judge_recall:.1%}")
-    print()
+    if java_stats and python_stats:
+        print("\nComparing performance across languages:\n")
+        print(f"Java:")
+        print(f"  Precision: {java_stats.judge_precision:.1%}")
+        print(f"  Recall: {java_stats.judge_recall:.1%}")
+        print()
+        print(f"Python:")
+        print(f"  Precision: {python_stats.judge_precision:.1%}")
+        print(f"  Recall: {python_stats.judge_recall:.1%}")
+        print()
 
-    precision_diff = abs(java_stats.judge_precision - python_stats.judge_precision)
-    recall_diff = abs(java_stats.judge_recall - python_stats.judge_recall)
+        precision_diff = abs(java_stats.judge_precision - python_stats.judge_precision)
+        recall_diff = abs(java_stats.judge_recall - python_stats.judge_recall)
 
-    if precision_diff < 0.15 and recall_diff < 0.15:
-        print("✓ Performance difference < 15% between languages")
-        print("✓ Language-agnostic design VALIDATED")
+        print(f"Precision difference: {precision_diff:.1%}")
+        print(f"Recall difference: {recall_diff:.1%}")
+        print()
+
+        # Honest verdict: only claim similarity when both languages have non-trivial results
+        if java_stats.judge_recall > 0.3 and python_stats.judge_recall > 0.3:
+            if precision_diff < 0.15 and recall_diff < 0.15:
+                print("✓ Both languages show non-trivial recall (>30%) with <15% difference")
+                print("✓ Results support language-agnostic design claim")
+            else:
+                print("⚠ Both languages have non-trivial recall, but performance difference >15%")
+                print("⚠ May need language-specific tuning")
+        else:
+            print("⚠ Results too low to claim language-agnostic parity")
+            print(f"  (At least one language has recall ≤30% — need better prompts or real static/context data)")
     else:
-        print("⚠ Performance varies significantly between languages")
-        print("⚠ May need language-specific tuning")
+        print("\n⚠ Insufficient data for language comparison")
 
-    # Detailed findings
+    # Detailed findings with detection hints
     print_separator("MISSED BUGS (False Negatives)")
 
+    # Build bug lookup for accessing detection_hints
+    bugs_by_id = {}
+    for bug in java_bugs + python_bugs:
+        bugs_by_id[bug.id] = bug
+
+    missed_count = 0
     for result in all_results:
         if not result.judge_caught:
+            missed_count += 1
+            bug = bugs_by_id.get(result.bug_id)
             print(f"\n{result.bug_id} ({result.language}): {result.category}")
-            # In a real eval, we'd analyze why this was missed
+            if bug and bug.detection_hints:
+                print(f"  Detection hints:")
+                for hint in bug.detection_hints:
+                    print(f"    - {hint}")
+
+    if missed_count == 0:
+        print("\n✓ No missed bugs — perfect recall!")
 
     print("\n" + "=" * 80 + "\n")
 
