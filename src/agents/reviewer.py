@@ -61,8 +61,7 @@ class ReviewerAgent:
     """
     LLM-powered reviewer that finds issues beyond static analysis.
 
-    For v1, this is a PLACEHOLDER that shows the prompt structure.
-    In the next phase, we'll add actual LLM calls (Claude via Anthropic API).
+    Uses Claude (via Anthropic API) to perform semantic code review.
     """
 
     def __init__(self, model: str = "claude-sonnet-4-5-20250929"):

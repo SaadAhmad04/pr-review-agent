@@ -363,8 +363,9 @@ def main():
     print("  - Finding #3 (N+1 Query): LOW score - speculative, weak confidence")
     print("  - Finding #5 (Race Condition): ZERO score - references non-existent file (hallucination)")
     print("  - Finding #6 (Variable Name): LOW score - subjective style issue despite high confidence")
-    print("\n  The Judge provides adversarial verification, catching hallucinations and")
-    print("  over-confident subjective opinions while preserving real, grounded findings.")
+    print("\n  The Judge uses evidence-based heuristic filtering — corroborating findings against")
+    print("  static analysis and context references, checking location validity, and scoring")
+    print("  by category/confidence. It uses deterministic rules, NOT an LLM.")
     print("\n" + "=" * 80 + "\n")
 
 

@@ -1,3 +1,13 @@
+# KNOWN LIMITATIONS OF THIS EVAL:
+# - Reviewer runs WITHOUT context (context_references={}) and WITHOUT static
+#   analysis (static_findings=[]). Context-dependent bugs (e.g., caller-not-
+#   updated) are effectively uncatchable in this pass. See java-004-breaking.
+# - Synthetic single-hunk diffs are much smaller than real PRs.
+# - "False positive" = "finding that doesn't match THE seeded bug." Some counted
+#   FPs are actually real, legitimate issues elsewhere in the code.
+# - Only 5 bugs/language: one miss = 20% recall swing. Numbers are noisy.
+# - LLM is non-deterministic even at temperature=0; recall varies ~±1 bug per run.
+
 """
 Evaluation harness for PR Review Agent.
 
@@ -9,7 +19,7 @@ Runs the agent against seeded bugs and measures:
 - Recall: TP / (TP + FN)
 
 Compares performance before and after Judge filtering.
-Breaks down results per language to prove language-agnostic design.
+Breaks down results per language to compare performance across languages
 """
 
 import sys

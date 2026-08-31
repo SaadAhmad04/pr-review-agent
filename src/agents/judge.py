@@ -1,10 +1,10 @@
 """
-Judge Agent - Independently scores and filters Reviewer findings.
+Judge Agent - Evidence-based heuristic filter for Reviewer findings.
 
 THE JUDGE'S ROLE:
 =================
 The Reviewer agent can hallucinate or be overconfident. The Judge provides
-a SECOND, INDEPENDENT opinion on each finding.
+independent scoring based on corroborating evidence.
 
 The Judge scores findings based on GROUNDING:
 - Is the issue supported by static analysis findings?
@@ -12,14 +12,15 @@ The Judge scores findings based on GROUNDING:
 - Is the reasoning sound based on the diff?
 - Or is it just LLM speculation?
 
-ADVERSARIAL DESIGN:
-===================
-The Judge is SKEPTICAL by default. It tries to REFUTE each finding.
-Only findings that survive adversarial scrutiny get through.
+HEURISTIC FILTER DESIGN:
+========================
+The Judge uses deterministic rules (NOT an LLM) to score each finding.
+It checks for evidence from static analysis and context search.
+Only findings that meet the threshold pass through.
 
-This is a common pattern in multi-agent systems:
+This is a generator-critic pattern:
 - Generator (Reviewer): Proposes candidates
-- Critic (Judge): Filters false positives
+- Critic (Judge): Filters false positives via evidence-based scoring
 - Result: Higher precision, lower false positive rate
 
 SCORING RUBRIC:
@@ -65,7 +66,7 @@ class JudgeVerdict:
 
 class JudgeAgent:
     """
-    Adversarial judge that scores Reviewer findings based on evidence.
+    Evidence-based heuristic filter that scores Reviewer findings.
     """
 
     def __init__(
@@ -405,9 +406,8 @@ class JudgeAgent:
         """
         Use an LLM to judge the finding (future implementation).
 
-        The LLM prompt would be adversarial:
-        "Try to REFUTE this finding. Look for evidence that contradicts it.
-         Only if you cannot refute it should you accept it."
+        This would allow more sophisticated reasoning about evidence,
+        though it would increase latency and cost.
         """
         # TODO: Implement LLM-based judging
         # For now, fall back to heuristics

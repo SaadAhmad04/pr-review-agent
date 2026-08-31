@@ -590,13 +590,9 @@ def reviewer_agent_node(state: PRReviewState) -> Dict[str, Any]:
         f"(primary language: {primary_language})"
     )
 
-    # For now, we'll just log the inputs that would go to the LLM
-    # In the next step, we'll implement the actual LLM call
     logger.info(f"Static analysis provided {len(static_findings)} findings")
     logger.info(f"Context search found {len(context_refs)} symbol references")
 
-    # Placeholder: return empty findings for now
-    # The actual agent implementation will go in agents/reviewer.py
     from src.agents.reviewer import ReviewerAgent
 
     try:
@@ -638,18 +634,18 @@ def judge_agent_node(state: PRReviewState) -> Dict[str, Any]:
     Reads: reviewer_findings, static_analysis_findings, context_references, pr_diff
     Writes: filtered_findings
 
-    THE ADVERSARIAL JUDGE:
-    ======================
+    THE HEURISTIC JUDGE FILTER:
+    ===========================
     The Reviewer can hallucinate or be overconfident. The Judge provides
-    independent verification:
+    independent scoring via heuristic rules:
 
     - Does static analysis support this finding?
     - Do context references support it?
     - Is the location valid?
     - Is the reasoning sound?
 
-    The Judge is SKEPTICAL by default. It tries to REFUTE each finding.
-    Only findings that survive adversarial scrutiny get through.
+    The Judge uses deterministic rules (NOT an LLM) to score each finding
+    based on corroborating evidence.
 
     CONFIGURABLE THRESHOLD:
     =======================
