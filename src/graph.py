@@ -37,6 +37,11 @@ DESIGN BENEFITS:
 
 from typing import Dict, Any, Optional
 import logging
+import tempfile
+import subprocess
+import shutil
+import os
+import stat
 
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage
@@ -89,6 +94,118 @@ def fetch_diff_node(state: PRReviewState) -> Dict[str, Any]:
         logger.error(f"Failed to fetch diff: {e}")
         return {
             "errors": [f"fetch_diff failed: {str(e)}"]
+        }
+
+
+def clone_repo_node(state: PRReviewState) -> Dict[str, Any]:
+    """
+    Node 1.5: Clone the reviewed repository to a temporary directory.
+
+    Reads: repository, pr_diff (head_sha), github_token
+    Writes: repo_path
+
+    WHY: Context search needs to search the REVIEWED repository's code,
+    not the pr-review-agent tool's own files. We clone the repo at the
+    PR's head commit into a temp directory and pass that path to context search.
+
+    Uses shallow clone (depth=1) for speed.
+    """
+    pr_diff = state.get("pr_diff")
+    repository = state.get("repository")
+    github_token = state.get("github_token")
+
+    if not pr_diff or not repository:
+        logger.warning("Skipping repo clone: no diff or repository info")
+        return {"repo_path": None}
+
+    head_sha = pr_diff.head_sha
+
+    try:
+        # Create temp directory
+        temp_dir = tempfile.mkdtemp(prefix="pr_review_")
+        logger.info(f"Cloning {repository} at {head_sha[:8]} to {temp_dir}")
+
+        # Build clone URL with token if available (for private repos)
+        if github_token:
+            clone_url = f"https://{github_token}@github.com/{repository}.git"
+        else:
+            clone_url = f"https://github.com/{repository}.git"
+
+        # Shallow clone at specific commit
+        # Note: --depth 1 with a specific SHA requires server support for "allowReachableSHA1InWant"
+        # Fallback: clone branch then checkout SHA
+        try:
+            # Try direct SHA clone first (faster if server supports it)
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--no-tags", clone_url, temp_dir],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            # Checkout the specific SHA
+            subprocess.run(
+                ["git", "-C", temp_dir, "fetch", "--depth", "1", "origin", head_sha],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            subprocess.run(
+                ["git", "-C", temp_dir, "checkout", head_sha],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+        except subprocess.CalledProcessError:
+            # Fallback: clone default branch then fetch+checkout SHA
+            logger.warning("Direct SHA clone failed, trying fallback")
+            subprocess.run(
+                ["git", "clone", "--depth", "50", clone_url, temp_dir],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            subprocess.run(
+                ["git", "-C", temp_dir, "checkout", head_sha],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+        logger.info(f"Successfully cloned to {temp_dir}")
+
+        return {
+            "repo_path": temp_dir,
+            "node_outputs": {
+                **state.get("node_outputs", {}),
+                "clone_repo": {
+                    "repo_path": temp_dir,
+                    "head_sha": head_sha,
+                }
+            }
+        }
+
+    except subprocess.TimeoutExpired:
+        logger.error("Repository clone timed out")
+        return {
+            "repo_path": None,
+            "errors": [f"clone_repo timed out after 60s"]
+        }
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to clone repository: {e.stderr}")
+        return {
+            "repo_path": None,
+            "errors": [f"clone_repo failed: {e.stderr}"]
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error cloning repository: {e}")
+        return {
+            "repo_path": None,
+            "errors": [f"clone_repo failed: {str(e)}"]
         }
 
 
@@ -222,7 +339,7 @@ def search_context_node(state: PRReviewState) -> Dict[str, Any]:
     """
     Node 4: Search for symbol references to understand context.
 
-    Reads: pr_diff, detected_languages
+    Reads: pr_diff, detected_languages, repo_path
     Writes: context_references
 
     CONTEXT SEARCH STRATEGY (relevance-ranked, level-based):
@@ -249,10 +366,21 @@ def search_context_node(state: PRReviewState) -> Dict[str, Any]:
     - Level 2: Assess blast radius and cross-cutting concerns
     """
     pr_diff = state.get("pr_diff")
+    repo_path = state.get("repo_path")
 
     if not pr_diff:
         logger.warning("Skipping context search: no diff available")
         return {"context_references": {}}
+
+    if not repo_path:
+        logger.warning("Skipping context search: repository not cloned (repo_path is None)")
+        return {
+            "context_references": {},
+            "node_outputs": {
+                **state.get("node_outputs", {}),
+                "context_search": {"status": "skipped", "reason": "no_repo_path"}
+            }
+        }
 
     try:
         # Get the context search strategy (ripgrep for v1)
@@ -281,12 +409,12 @@ def search_context_node(state: PRReviewState) -> Dict[str, Any]:
 
         for symbol, score in top_symbols:
             try:
-                # Search whole repo (repo_path=".") - we WANT cross-file refs
-                # This is the point: find related code BEYOND the diff
+                # Search the REVIEWED repo (not the tool's own directory)
+                # This finds actual callers/definitions in the codebase being reviewed
                 # max_results=50 per symbol so we have enough to rank before filtering
                 refs = strategy.find_references(
                     symbol=symbol,
-                    repo_path=".",
+                    repo_path=repo_path,
                     max_results=50
                 )
 
@@ -369,7 +497,13 @@ def _extract_changed_symbols(pr_diff):
     because they identify functions actually being modified (catches signature
     changes, refactorings that break callers).
 
-    SECONDARY source: Added lines - LOW priority, aggressively filtered
+    SECONDARY source: REMOVED lines - HIGH priority (score: 8.0)
+    WHY: For renames (getAllStudents -> findAllStudents), the OLD name appears
+    only in removed lines. We MUST search for it to find stale callers still
+    using the old name. That's exactly the bug this tool should catch.
+    Score: 8.0 (high, but below hunk headers at 10.0 - headers are gold standard)
+
+    TERTIARY source: Added lines - LOW priority, aggressively filtered
     (avoids noise from imports, test helpers, common names).
 
     Returns:
@@ -423,7 +557,33 @@ def _extract_changed_symbols(pr_diff):
                 symbol = before_paren_match.group(1)
                 symbols_with_scores[symbol] = max(symbols_with_scores.get(symbol, 0), 10.0)
 
-        # SECONDARY: Extract from added lines (filtered)
+        # SECONDARY: Extract from REMOVED lines (catch renamed symbols)
+        removed_lines = [
+            line[1:].strip()
+            for line in file_diff.patch.split('\n')
+            if line.startswith('-') and not line.startswith('---')
+        ]
+
+        for line in removed_lines:
+            # Function-like patterns: word(
+            func_pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\('
+            for match in re.finditer(func_pattern, line):
+                symbol = match.group(1)
+                if len(symbol) >= 3 and symbol.lower() not in STOPLIST:
+                    # HIGH priority: 8.0
+                    # WHY: Renamed symbols appear only in removed lines.
+                    # Finding stale callers is CRITICAL for catching rename bugs.
+                    symbols_with_scores[symbol] = max(symbols_with_scores.get(symbol, 0), 8.0)
+
+            # Capitalized words (likely classes/constants)
+            capital_pattern = r'\b([A-Z][a-zA-Z0-9_]{2,})\b'
+            for match in re.finditer(capital_pattern, line):
+                symbol = match.group(1)
+                # Keep ALL_CAPS constants (MAX_RETRIES, PAYMENT_TIMEOUT) - relevant to logical bugs
+                if len(symbol) >= 3 and symbol.lower() not in STOPLIST:
+                    symbols_with_scores[symbol] = max(symbols_with_scores.get(symbol, 0), 8.0)
+
+        # TERTIARY: Extract from added lines (filtered)
         added_lines = [
             line[1:].strip()
             for line in file_diff.patch.split('\n')
@@ -726,6 +886,75 @@ def judge_agent_node(state: PRReviewState) -> Dict[str, Any]:
         return {"errors": [f"judge_agent failed: {str(e)}"]}
 
 
+def cleanup_repo_node(state: PRReviewState) -> Dict[str, Any]:
+    """
+    Final node: Clean up cloned repository.
+
+    Reads: repo_path
+    Writes: nothing
+
+    Removes the temporary clone directory to free disk space.
+    Called as the very last step after posting findings.
+
+    Windows-safe: handles read-only .git/objects files by clearing
+    the read-only bit and retrying deletion.
+    """
+    repo_path = state.get("repo_path")
+
+    if not repo_path or not os.path.exists(repo_path):
+        # Nothing to clean up
+        return {}
+
+    def handle_remove_readonly(func, path, exc_info):
+        """
+        Error handler for shutil.rmtree on Windows.
+
+        Git marks files in .git/objects as read-only, causing
+        PermissionError on Windows. Clear the read-only bit and retry.
+
+        Args:
+            func: The function that raised the error (os.remove or os.rmdir)
+            path: The path that failed
+            exc_info: Exception tuple (type, value, traceback)
+        """
+        # Check if it's a permission error (Windows read-only)
+        if not os.access(path, os.W_OK):
+            # Clear read-only bit (add write permission)
+            os.chmod(path, stat.S_IWRITE)
+            # Retry the operation
+            func(path)
+        else:
+            # Not a read-only issue, re-raise
+            raise
+
+    try:
+        logger.info(f"Cleaning up cloned repository at {repo_path}")
+        shutil.rmtree(repo_path, onerror=handle_remove_readonly)
+        logger.info("Cleanup successful")
+        return {
+            "node_outputs": {
+                **state.get("node_outputs", {}),
+                "cleanup": {"status": "success", "removed_path": repo_path}
+            }
+        }
+    except Exception as e:
+        # Cleanup failure should not block the pipeline or pollute errors
+        # Just log a warning - the review completed successfully
+        logger.warning(f"Failed to clean up repository clone at {repo_path}: {e}")
+        logger.warning("Temp directory will need manual cleanup")
+        return {
+            "node_outputs": {
+                **state.get("node_outputs", {}),
+                "cleanup": {
+                    "status": "failed",
+                    "path": repo_path,
+                    "error": str(e),
+                    "note": "Review completed successfully despite cleanup failure"
+                }
+            }
+        }
+
+
 def post_findings_node(state: PRReviewState) -> Dict[str, Any]:
     """
     Node 7: Post findings to GitHub PR.
@@ -934,17 +1163,19 @@ def create_review_graph(checkpointer=None):
           ↓
         fetch_diff
           ↓
+        clone_repo ← NEW: Clone reviewed repo to temp dir for context search
+          ↓
         detect_language
           ↓
         run_static_analysis
           ↓
-        search_context
+        search_context (now uses cloned repo, not tool's own directory)
           ↓
         reviewer_agent (generates findings)
           ↓
         judge_agent (filters findings)
           ↓
-        post_findings (posts to GitHub) ← NEW NODE
+        post_findings (posts to GitHub)
           │
           ├─ High confidence (≥0.8): Auto-post immediately
           │
@@ -953,6 +1184,8 @@ def create_review_graph(checkpointer=None):
           │  User reviews → approves/rejects → resumes graph
           │
           └─ Low confidence (<0.5): Discard
+          ↓
+        cleanup_repo ← NEW: Remove temp clone directory
           ↓
         END
 
@@ -978,22 +1211,26 @@ def create_review_graph(checkpointer=None):
 
     # Add nodes
     graph.add_node("fetch_diff", fetch_diff_node)
+    graph.add_node("clone_repo", clone_repo_node)  # NEW: Clone reviewed repo
     graph.add_node("detect_language", detect_language_node)
     graph.add_node("run_static_analysis", run_static_analysis_node)
     graph.add_node("search_context", search_context_node)
     graph.add_node("reviewer_agent", reviewer_agent_node)
     graph.add_node("judge_agent", judge_agent_node)
-    graph.add_node("post_findings", post_findings_node)  # NEW: Posts to GitHub
+    graph.add_node("post_findings", post_findings_node)
+    graph.add_node("cleanup_repo", cleanup_repo_node)  # NEW: Cleanup temp clone
 
-    # Define edges (linear flow ending with posting)
+    # Define edges (linear flow with clone and cleanup)
     graph.set_entry_point("fetch_diff")
-    graph.add_edge("fetch_diff", "detect_language")
+    graph.add_edge("fetch_diff", "clone_repo")  # NEW: Fetch → Clone
+    graph.add_edge("clone_repo", "detect_language")  # NEW: Clone → Detect
     graph.add_edge("detect_language", "run_static_analysis")
     graph.add_edge("run_static_analysis", "search_context")
     graph.add_edge("search_context", "reviewer_agent")
     graph.add_edge("reviewer_agent", "judge_agent")
-    graph.add_edge("judge_agent", "post_findings")  # NEW: Judge → Post
-    graph.add_edge("post_findings", END)
+    graph.add_edge("judge_agent", "post_findings")
+    graph.add_edge("post_findings", "cleanup_repo")  # NEW: Post → Cleanup
+    graph.add_edge("cleanup_repo", END)  # NEW: Cleanup → End
 
     # Compile with checkpointer for interrupt support
     # Without checkpointer, interrupts will fail

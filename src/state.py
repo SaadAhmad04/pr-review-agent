@@ -88,6 +88,9 @@ class PRReviewState(TypedDict):
     # ===== DIFF FETCHING =====
     pr_diff: Optional[PRDiff]  # Complete diff from GitHub API
 
+    # ===== REPO CLONE =====
+    repo_path: Optional[str]  # Local path to cloned repository (for context search)
+
     # ===== LANGUAGE DETECTION =====
     detected_languages: List[LanguageInfo]  # Languages found in the diff
     primary_language: Optional[str]  # The most common language (for agent prompt)
@@ -163,6 +166,7 @@ def create_initial_state(
         pr_number=pr_number,
         github_token=github_token,
         pr_diff=None,
+        repo_path=None,
         detected_languages=[],
         primary_language=None,
         static_analysis_results={},
