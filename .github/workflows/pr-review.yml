@@ -1,0 +1,95 @@
+name: PR Code Review
+
+# Trigger on pull request events
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # opened: New PR created
+    # synchronize: New commits pushed to PR
+    # reopened: Closed PR reopened
+
+# Permissions required for the Action to post review comments
+permissions:
+  contents: read        # Read repository code
+  pull-requests: write  # Post review comments to PR
+
+jobs:
+  review:
+    name: Automated Code Review
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python 3.11 (stable, well-supported)
+      # Note: 3.12 would also work, but 3.11 is LTS and widely used in Actions
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'  # Cache pip dependencies for faster runs
+
+      # Step 3: Install Python dependencies
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          # Install additional tools mentioned in requirements.txt
+          pip install pylint
+
+      # Step 4: Install ripgrep (required for context search)
+      # ripgrep is available in Ubuntu apt repos
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      # Step 5: Install Checkstyle (required for Java static analysis)
+      # Download the JAR directly from GitHub releases (faster than apt)
+      # We use version 10.12.5 (latest stable as of writing)
+      - name: Install Checkstyle
+        continue-on-error: true 
+        run: |
+          # Create directory for external tools
+          mkdir -p ~/.local/bin
+
+          # Download Checkstyle JAR
+          CHECKSTYLE_VERSION=10.12.5
+          wget -q "https://github.com/checkstyle/checkstyle/releases/download/checkstyle-${CHECKSTYLE_VERSION}/checkstyle-${CHECKSTYLE_VERSION}-all.jar" \
+            -O ~/.local/bin/checkstyle.jar
+
+          # Create wrapper script so we can call it as "checkstyle"
+          cat > ~/.local/bin/checkstyle << 'EOF'
+          #!/bin/bash
+          exec java -jar ~/.local/bin/checkstyle.jar "$@"
+          EOF
+
+          chmod +x ~/.local/bin/checkstyle
+
+          # Add to PATH for this job
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+          # Verify installation
+          java -jar ~/.local/bin/checkstyle.jar --version
+
+      # Step 6: Run the PR review agent
+      - name: Run PR review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # GITHUB_REPOSITORY and GITHUB_EVENT_PATH are automatically set by Actions
+        run: |
+          python scripts/run_action.py
+
+      # Optional: Upload review results as an artifact for debugging
+      # (Useful if you want to inspect the full state output)
+      - name: Upload review artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-debug-logs
+          path: |
+            ${{ github.event_path }}
+          retention-days: 7
