@@ -896,8 +896,9 @@ def cleanup_repo_node(state: PRReviewState) -> Dict[str, Any]:
     Removes the temporary clone directory to free disk space.
     Called as the very last step after posting findings.
 
-    Windows-safe: handles read-only .git/objects files by clearing
-    the read-only bit and retrying deletion.
+    Windows-safe: on PermissionError (read-only .git/objects files),
+    walks the tree clearing read-only bits and retries deletion once.
+    Version-agnostic (no reliance on onerror/onexc parameters).
     """
     repo_path = state.get("repo_path")
 
@@ -905,38 +906,73 @@ def cleanup_repo_node(state: PRReviewState) -> Dict[str, Any]:
         # Nothing to clean up
         return {}
 
-    def handle_remove_readonly(func, path, exc_info):
+    def make_writable_and_retry(path):
         """
-        Error handler for shutil.rmtree on Windows.
+        Walk the directory tree and clear read-only bits on all files/dirs.
 
-        Git marks files in .git/objects as read-only, causing
-        PermissionError on Windows. Clear the read-only bit and retry.
+        Git marks .git/objects files as read-only on Windows, causing
+        PermissionError. This clears the read-only attribute on everything
+        so rmtree can delete them.
 
         Args:
-            func: The function that raised the error (os.remove or os.rmdir)
-            path: The path that failed
-            exc_info: Exception tuple (type, value, traceback)
+            path: Root directory to make writable
         """
-        # Check if it's a permission error (Windows read-only)
-        if not os.access(path, os.W_OK):
-            # Clear read-only bit (add write permission)
-            os.chmod(path, stat.S_IWRITE)
-            # Retry the operation
-            func(path)
-        else:
-            # Not a read-only issue, re-raise
-            raise
+        for root, dirs, files in os.walk(path):
+            # Clear read-only on all files
+            for name in files:
+                file_path = os.path.join(root, name)
+                try:
+                    os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD)
+                except Exception as e:
+                    logger.debug(f"Could not chmod file {file_path}: {e}")
+
+            # Clear read-only on all directories
+            for name in dirs:
+                dir_path = os.path.join(root, name)
+                try:
+                    os.chmod(dir_path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+                except Exception as e:
+                    logger.debug(f"Could not chmod dir {dir_path}: {e}")
+
+        # Also clear read-only on the root itself
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        except Exception as e:
+            logger.debug(f"Could not chmod root {path}: {e}")
 
     try:
         logger.info(f"Cleaning up cloned repository at {repo_path}")
-        shutil.rmtree(repo_path, onerror=handle_remove_readonly)
-        logger.info("Cleanup successful")
-        return {
-            "node_outputs": {
-                **state.get("node_outputs", {}),
-                "cleanup": {"status": "success", "removed_path": repo_path}
+
+        # First attempt: try normal deletion
+        try:
+            shutil.rmtree(repo_path)
+            logger.info("Cleanup successful")
+            return {
+                "node_outputs": {
+                    **state.get("node_outputs", {}),
+                    "cleanup": {"status": "success", "removed_path": repo_path}
+                }
             }
-        }
+        except PermissionError as pe:
+            # Windows read-only issue: clear read-only bits and retry
+            logger.debug(f"PermissionError on first attempt: {pe}")
+            logger.info("Clearing read-only bits on clone directory...")
+            make_writable_and_retry(repo_path)
+
+            # Second attempt: should succeed now
+            shutil.rmtree(repo_path)
+            logger.info("Cleanup successful (after clearing read-only bits)")
+            return {
+                "node_outputs": {
+                    **state.get("node_outputs", {}),
+                    "cleanup": {
+                        "status": "success",
+                        "removed_path": repo_path,
+                        "note": "Required clearing read-only bits (Windows .git issue)"
+                    }
+                }
+            }
+
     except Exception as e:
         # Cleanup failure should not block the pipeline or pollute errors
         # Just log a warning - the review completed successfully
