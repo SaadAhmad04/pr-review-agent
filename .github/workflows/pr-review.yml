@@ -46,7 +46,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ripgrep
 
-      # Step 5: Install Checkstyle (required for Java static analysis)
+      # Step 5: Set up Java (required for Checkstyle)
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # Step 6: Install Checkstyle (required for Java static analysis)
       # Download the JAR directly from GitHub releases (faster than apt)
       # We use version 10.12.5 (latest stable as of writing)
       - name: Install Checkstyle
@@ -74,7 +81,7 @@ jobs:
           # Verify installation
           java -jar ~/.local/bin/checkstyle.jar --version
 
-      # Step 6: Run the PR review agent
+      # Step 7: Run the PR review agent
       - name: Run PR review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

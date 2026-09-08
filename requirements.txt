@@ -1,13 +1,14 @@
-# Core dependencies
-requests>=2.31.0           # GitHub API calls
-langgraph>=0.0.40          # State graph orchestration
-langchain>=0.1.0           # LLM framework (for agents)
-langchain-anthropic>=0.1.0 # Claude API integration
-python-dotenv>=1.0.0       # Environment variable management
+# Core dependencies (pinned to working versions from 2026-09-08 resolution)
+requests==2.34.2           # GitHub API calls
+langgraph==1.2.11          # State graph orchestration
+langchain==1.4.0           # LLM framework (for agents)
+langchain-anthropic==1.7.1 # Claude API integration
+anthropic==1.4.0           # Anthropic SDK (required by langchain-anthropic)
+python-dotenv==1.2.3       # Environment variable management
 
 # Development/testing
-pytest>=7.4.0
-pytest-cov>=4.1.0
+pytest==9.1.1
+pytest-cov==7.1.0
 
 # Note: External tools required but not pip-installable:
 # - pylint (Python linting): pip install pylint
