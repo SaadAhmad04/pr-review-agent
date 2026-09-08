@@ -134,7 +134,7 @@ class PRReviewState(TypedDict):
     node_outputs: Dict[str, dict]  # Metadata from each node (for debugging)
 
 
-def create_initial_review_state(
+def create_initial_state(
     repository: str,
     pr_number: int,
     github_token: Optional[str] = None,
@@ -158,7 +158,7 @@ def create_initial_review_state(
                                    Findings < this are discarded
 
     Example:
-        >>> state = create_initial_review_state("facebook/react", 12345, "ghp_token123")
+        >>> state = create_initial_state("facebook/react", 12345, "ghp_token123")
         >>> result = graph.invoke(state)
     """
     return PRReviewState(

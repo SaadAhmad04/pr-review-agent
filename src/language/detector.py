@@ -101,7 +101,7 @@ def detect_languages_from_files(file_paths: List[str]) -> List[LanguageInfo]:
     return language_infos
 
 
-def get_supported_languages() -> Set[str]:
+def get_all_supported_languages() -> Set[str]:
     """
     Return the set of all languages we can detect.
 
