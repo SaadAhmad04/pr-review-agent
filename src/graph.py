@@ -1152,6 +1152,7 @@ def post_findings_node(state: PRReviewState) -> Dict[str, Any]:
             pr_number=state["pr_number"],
             commit_sha=pr_diff.head_sha if pr_diff else "HEAD",
             github_token=github_token,
+            pr_diff=pr_diff,
             stats=stats,
         )
 
