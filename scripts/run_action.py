@@ -175,7 +175,20 @@ def main():
                 logger.warning(f"Cleanup: {cleanup.get('status')} - {cleanup.get('error', 'unknown')}")
 
         logger.info("")
-        logger.info("✅ Review posted to PR successfully")
+
+        # Truthful posting status based on actual results
+        if posted_findings:
+            # Success: findings were actually posted
+            logger.info(f"[SUCCESS] Posted {len(posted_findings)} finding(s) to PR")
+        elif filtered_findings:
+            # Findings exist but none were posted - report the truth
+            logger.warning(f"[WARNING] Found {len(filtered_findings)} finding(s) but posting failed")
+            if errors:
+                logger.warning(f"Reason: {errors[-1]}")  # Show last error
+            # Still exit 0 since review completed, just posting had issues
+        else:
+            # No findings to post
+            logger.info("[SUCCESS] Review completed - no issues found")
 
         sys.exit(0)
 
