@@ -130,7 +130,7 @@ class AnalysisResult:
         """Mark an analyzer as failed."""
         self.analyzers_failed.append(analyzer_name)
 
-    def mark_unavailable(self, analyzer_name: str):
+    def mark_analyzer_unavailable(self, analyzer_name: str):
         """Mark an analyzer as unavailable (not installed)."""
         self.analyzers_unavailable.append(analyzer_name)
 
