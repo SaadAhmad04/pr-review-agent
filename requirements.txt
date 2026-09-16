@@ -2,9 +2,13 @@
 requests==2.34.2           # GitHub API calls
 langgraph==1.2.11          # State graph orchestration
 langchain==1.4.0           # LLM framework (for agents)
+python-dotenv==1.2.3       # Environment variable management
+
+# LLM provider integrations (install only what you need)
 langchain-anthropic==1.7.1 # Claude API integration
 anthropic==1.4.0           # Anthropic SDK (required by langchain-anthropic)
-python-dotenv==1.2.3       # Environment variable management
+langchain-openai==1.6.2
+langchain-ollama==1.1.0
 
 # Development/testing
 pytest==9.1.1

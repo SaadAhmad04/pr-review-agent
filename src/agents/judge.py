@@ -73,13 +73,13 @@ class JudgeAgent:
         self,
         threshold: float = 0.6,
         use_llm: bool = False,  # For v1, use heuristics; v2 can use LLM
-        model: str = "claude-3-5-sonnet-20241022"
+        model: Optional[str] = None
     ):
         """
         Args:
             threshold: Minimum score to pass (0.0 to 1.0)
             use_llm: Whether to use LLM for scoring (not implemented in v1)
-            model: LLM model to use if use_llm=True
+            model: LLM model to use if use_llm=True (currently unused, reserved for future)
         """
         self.threshold = threshold
         self.use_llm = use_llm

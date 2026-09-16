@@ -40,9 +40,9 @@ import re
 from typing import List, Dict, Optional, Any
 
 from dotenv import load_dotenv
-from langchain_anthropic import ChatAnthropic
 
 from src.state import ReviewerFinding
+from src.llm_factory import get_llm
 from src.tools.diff_fetch import PRDiff
 from src.language.detector import LanguageInfo
 from src.static_analysis.base import Finding
@@ -61,11 +61,38 @@ class ReviewerAgent:
     """
     LLM-powered reviewer that finds issues beyond static analysis.
 
-    Uses Claude (via Anthropic API) to perform semantic code review.
+    Supports multiple LLM providers (Anthropic, OpenAI, Ollama) via LangChain.
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-5-20250929"):
-        self.model = model
+    def __init__(
+        self,
+        provider: Optional[str] = None,
+        model: Optional[str] = None
+    ):
+        """
+        Initialize the reviewer agent.
+
+        Args:
+            provider: LLM provider ("anthropic", "openai", "ollama").
+                      Defaults to env var LLM_PROVIDER or "anthropic".
+            model: Model name. Defaults to env var LLM_MODEL or a provider-specific default.
+        """
+        # Load provider from env or use default
+        self.provider = provider or os.getenv("LLM_PROVIDER", "anthropic").lower()
+
+        # Load model from env or use provider-specific default
+        if model:
+            self.model = model
+        elif os.getenv("LLM_MODEL"):
+            self.model = os.getenv("LLM_MODEL")
+        else:
+            # Provider-specific defaults
+            default_models = {
+                "anthropic": "claude-sonnet-4-5-20250929",
+                "openai": "gpt-4o",
+                "ollama": "llama3",
+            }
+            self.model = default_models.get(self.provider, "claude-sonnet-4-5-20250929")
 
     def review(
         self,
@@ -89,14 +116,24 @@ class ReviewerAgent:
             List of ReviewerFinding objects
         """
 
-        # Graceful degradation if API key not set
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            logger.warning(
-                "ANTHROPIC_API_KEY not set — skipping LLM review, returning no findings. "
-                "Set the key in .env to enable AI-powered review."
-            )
-            return []
+        # Provider-aware API key check
+        if self.provider == "anthropic":
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                logger.warning(
+                    "ANTHROPIC_API_KEY not set — skipping LLM review, returning no findings. "
+                    "Set the key in .env to enable AI-powered review."
+                )
+                return []
+        elif self.provider == "openai":
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                logger.warning(
+                    "OPENAI_API_KEY not set — skipping LLM review, returning no findings. "
+                    "Set the key in .env to enable AI-powered review."
+                )
+                return []
+        # Ollama is local, no API key required
 
         # Build the prompt
         prompt = self._build_prompt(
@@ -111,15 +148,15 @@ class ReviewerAgent:
 
         # Create the LLM client ONCE and reuse it for token counting + the call
         try:
-            llm = ChatAnthropic(
-                model_name=self.model,        # correct for this version (verified via signature)
-                temperature=0.0,              # deterministic review
-                max_tokens_to_sample=4096,    # correct for this version (verified via signature)
-                timeout=60.0,                 # REQUIRED in this version — 60s per call
-                stop=None,                    # REQUIRED in this version — no custom stop sequences
+            llm = get_llm(
+                provider=self.provider,
+                model=self.model,
+                temperature=0.0,       # deterministic review
+                max_tokens=4096,
+                timeout=60.0,
             )
         except Exception as e:
-            logger.error(f"Failed to initialize LLM client: {e}")
+            logger.error(f"Failed to initialize LLM client ({self.provider}/{self.model}): {e}")
             return []
 
         # Token budgeting (pass the existing client — don't create a new one)
@@ -468,25 +505,24 @@ Static analysis already caught the simple stuff.
         }
         return extensions.get(language, "txt")
 
-    def _count_tokens(self, text: str, llm: ChatAnthropic) -> int:
+    def _count_tokens(self, text: str, llm: Any) -> int:
         """
         Estimate token count for budgeting purposes.
 
-        WHY CHARACTER APPROXIMATION (not a "real" tokenizer):
-        - tiktoken is OpenAI's tokenizer — WRONG for Claude. Never use it.
-        - langchain-anthropic's get_num_tokens() does NOT use Claude's tokenizer
-        either; in this version it falls back to a GPT-2 tokenizer (also wrong,
-        and requires the heavy `transformers` package). Verified broken/inaccurate.
-        - Anthropic's real count_tokens endpoint requires a network round-trip per
-        call — overkill for a simple "is the prompt too big?" budget check.
+        WHY CHARACTER APPROXIMATION (not a provider-specific tokenizer):
+        - Different providers use different tokenizers (tiktoken for OpenAI,
+          Claude's tokenizer for Anthropic, etc.). A character approximation
+          works across all providers.
+        - Provider-specific tokenizers may require network calls (Anthropic's
+          count_tokens API) or heavy dependencies (transformers for GPT-2 fallback).
+        - This is only for a conservative budget check before MAX_PROMPT_TOKENS,
+          so approximate is sufficient.
 
-        So we use a conservative ~4-chars-per-token approximation. This is only
-        used to decide whether to truncate before a deliberately conservative
-        ceiling (MAX_PROMPT_TOKENS), so approximate is sufficient.
+        We use ~4-chars-per-token, which is conservative for most tokenizers.
         """
         return len(text) // 4
 
-    def _truncate_to_budget(self, prompt: str, llm: ChatAnthropic) -> str:
+    def _truncate_to_budget(self, prompt: str, llm: Any) -> str:
         """
         Truncate prompt to fit within MAX_PROMPT_TOKENS budget.
 
@@ -499,7 +535,7 @@ Static analysis already caught the simple stuff.
 
         Args:
             prompt: The prompt text to potentially truncate
-            llm: The ChatAnthropic client to use for token counting
+            llm: The LLM client (provider-agnostic)
 
         Returns:
             The original or truncated prompt
@@ -523,13 +559,13 @@ Static analysis already caught the simple stuff.
         return truncated
 
     def _call_llm_with_retry(
-        self, llm: ChatAnthropic, prompt: str, max_attempts: int = 2
+        self, llm: Any, prompt: str, max_attempts: int = 2
     ) -> Optional[str]:
         """
         Call the LLM with simple retry logic for transient errors.
 
         Args:
-            llm: The ChatAnthropic client
+            llm: The LLM client (provider-agnostic, uses .invoke())
             prompt: The prompt to send
             max_attempts: Maximum number of attempts (default 2)
 
