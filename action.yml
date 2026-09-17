@@ -1,0 +1,36 @@
+name: "PR Review Agent"
+description: "AI-powered PR review with multi-provider LLM support (Anthropic, OpenAI, Ollama). Posts findings as PR comments."
+branding:
+  icon: "check-circle"
+  color: "blue"
+
+inputs:
+  anthropic_api_key:
+    description: "Anthropic API key (for Claude models)"
+    required: false
+  openai_api_key:
+    description: "OpenAI API key (for GPT models)"
+    required: false
+  llm_provider:
+    description: "LLM provider to use: anthropic | openai | ollama"
+    required: false
+    default: "anthropic"
+  llm_model:
+    description: "Model name (optional; uses provider default if unset)"
+    required: false
+  github_token:
+    description: "GitHub token for posting PR comments"
+    required: true
+    default: ${{ github.token }}
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    # LLM provider configuration
+    ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+    OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+    LLM_PROVIDER: ${{ inputs.llm_provider }}
+    LLM_MODEL: ${{ inputs.llm_model }}
+    # GitHub context (automatically set by Actions, but must be explicitly passed to Docker container)
+    GITHUB_TOKEN: ${{ inputs.github_token }}

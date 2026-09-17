@@ -110,15 +110,34 @@ def main():
         logger.error("Make sure to pass secrets.GITHUB_TOKEN in the workflow")
         sys.exit(1)
 
-    anthropic_api_key = os.environ.get('ANTHROPIC_API_KEY')
-    if not anthropic_api_key:
-        logger.error("ANTHROPIC_API_KEY environment variable not set")
-        logger.error("Add ANTHROPIC_API_KEY to repository secrets")
-        sys.exit(1)
+    # Validate LLM provider configuration
+    llm_provider = os.environ.get('LLM_PROVIDER', 'anthropic').lower()
+    logger.info(f"LLM Provider: {llm_provider}")
 
-    # Set Anthropic API key for the agent
-    # (The agent uses langchain-anthropic which reads from env)
-    os.environ['ANTHROPIC_API_KEY'] = anthropic_api_key
+    if llm_provider == 'anthropic':
+        anthropic_api_key = os.environ.get('ANTHROPIC_API_KEY')
+        if not anthropic_api_key:
+            logger.error("ANTHROPIC_API_KEY environment variable not set")
+            logger.error("Add ANTHROPIC_API_KEY to repository secrets or use a different provider")
+            sys.exit(1)
+        logger.info("Anthropic API key validated")
+    elif llm_provider == 'openai':
+        openai_api_key = os.environ.get('OPENAI_API_KEY')
+        if not openai_api_key:
+            logger.error("OPENAI_API_KEY environment variable not set")
+            logger.error("Add OPENAI_API_KEY to repository secrets or use a different provider")
+            sys.exit(1)
+        logger.info("OpenAI API key validated")
+    elif llm_provider == 'ollama':
+        # Ollama doesn't require API key (local/self-hosted)
+        logger.info("Using Ollama (no API key required)")
+        llm_model = os.environ.get('LLM_MODEL')
+        if not llm_model:
+            logger.warning("LLM_MODEL not set - Ollama will use its default model")
+    else:
+        logger.error(f"Unsupported LLM provider: {llm_provider}")
+        logger.error("Supported providers: anthropic, openai, ollama")
+        sys.exit(1)
 
     logger.info("Environment validated")
     logger.info("Starting PR review...")

@@ -348,6 +348,111 @@ echo "GITHUB_TOKEN=ghp_your_token_here" > .env
 
 ---
 
+## Using This Action in Your Repository
+
+You can use this PR review agent in **any GitHub repository** as a reusable action. No local installation needed — it runs on GitHub's runners.
+
+### Quick Setup (5 lines)
+
+Add this workflow to your repository at `.github/workflows/pr-review.yml`:
+
+```yaml
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write  # Required to post review comments
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: AI Code Review
+        uses: SaadAhmad04/pr-review-agent@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Add Your API Key
+
+1. Go to your repository's **Settings → Secrets and variables → Actions**
+2. Click **New repository secret**
+3. Name: `ANTHROPIC_API_KEY`
+4. Value: Your Anthropic API key (get one at [console.anthropic.com](https://console.anthropic.com))
+5. Click **Add secret**
+
+That's it! On the next PR, the action will:
+- ✅ Clone your repo
+- ✅ Run AI-powered code review
+- ✅ Post findings as PR comments
+
+### Multi-Provider Support
+
+The action supports **Anthropic (Claude)**, **OpenAI (GPT)**, and **Ollama**:
+
+```yaml
+# Use OpenAI instead
+- uses: SaadAhmad04/pr-review-agent@v1
+  with:
+    llm_provider: openai
+    openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+    llm_model: gpt-4o  # Optional: specify model
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+
+# Use Ollama (local/self-hosted)
+- uses: SaadAhmad04/pr-review-agent@v1
+  with:
+    llm_provider: ollama
+    llm_model: llama3.1:70b
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Action Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `anthropic_api_key` | Anthropic API key | No* | - |
+| `openai_api_key` | OpenAI API key | No* | - |
+| `llm_provider` | Provider: `anthropic` \| `openai` \| `ollama` | No | `anthropic` |
+| `llm_model` | Model name (e.g., `claude-3-5-sonnet-20241022`, `gpt-4o`) | No | Provider default |
+| `github_token` | GitHub token for posting comments | Yes | `${{ github.token }}` |
+
+\* At least one API key is required unless using Ollama
+
+### What Gets Reviewed
+
+The action reviews **all changed files** in the PR:
+- **Python**: pylint + AI review
+- **Java**: Checkstyle coming soon (Python-only for v1)
+- **Other languages**: AI review only
+
+Findings are posted as **inline PR comments** with:
+- 📍 File path and line number
+- 🔍 Issue description
+- ⚡ Severity (high/medium/low)
+- 💡 Suggested fix
+
+### Troubleshooting
+
+**Action fails with "ANTHROPIC_API_KEY not set"**
+- Check that you added the secret to **repository settings** (not organization settings)
+- Verify the secret name is exactly `ANTHROPIC_API_KEY` (case-sensitive)
+
+**No comments posted**
+- Check `permissions: pull-requests: write` is in your workflow
+- Ensure the PR has actual code changes (not just markdown/config)
+
+**Review takes too long**
+- Large PRs (>500 LOC) may take 2-5 minutes
+- Consider splitting into smaller PRs for faster feedback
+
+---
+
 ## Usage
 
 ### Basic Review
